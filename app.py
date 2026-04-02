@@ -1,17 +1,14 @@
 import sys
 import os
 import random
+import hashlib
 from datetime import datetime, timedelta
 
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import (
-    Configuration,
-    ApiClient,
-    MessagingApi,
-    PushMessageRequest,
-    ReplyMessageRequest,
-    TextMessage,
+    Configuration, ApiClient, MessagingApi,
+    PushMessageRequest, ReplyMessageRequest, TextMessage,
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from linebot.v3.exceptions import InvalidSignatureError
@@ -35,23 +32,33 @@ AMBASSADORS = [
     {"name": "이태의", "category": "기타(양식, 아시안 등)"},
 ]
 
-last_pick = None
 
-
-def pick_ambassador():
-    global last_pick
-    candidates = [a for a in AMBASSADORS if a["name"] != last_pick]
-    chosen = random.choice(candidates)
-    last_pick = chosen["name"]
-    return chosen
-
-
-def get_weekday_kr():
+def get_weekly_ambassador(target_date=None):
     kst = pytz.timezone("Asia/Seoul")
-    tomorrow = datetime.now(kst).replace(hour=0, minute=0) + timedelta(days=1)
-    days = ["월", "화", "수", "목", "금", "토", "일"]
-    return days[tomorrow.weekday()]
+    if target_date is None:
+        target_date = datetime.now(kst).date() + timedelta(days=1)
 
+    year, week_num, _ = target_date.isocalendar()
+    seed_str = f"lunch-ambassador-{year}-W{week_num}"
+    seed = int(hashlib.md5(seed_str.encode()).hexdigest(), 16)
+
+    rng = random.Random(seed)
+    week_order = list(AMBASSADORS)
+    rng.shuffle(week_order)
+
+    weekday = target_date.isoweekday()
+    if 1 <= weekday <= 4:
+        return week_order[weekday - 1]
+    else:
+        return rng.choice(week_order)
+
+
+def get_weekday_kr(target_date=None):
+    kst = pytz.timezone("Asia/Seoul")
+    if target_date is None:
+        target_date = datetime.now(kst).date() + timedelta(days=1)
+    days = ["월", "화", "수", "목", "금", "토", "일"]
+    return days[target_date.weekday()]
 
 def build_message(chosen, weekday):
     return (
@@ -67,11 +74,27 @@ def build_message(chosen, weekday):
     )
 
 
+def get_week_schedule_message():
+    kst = pytz.timezone("Asia/Seoul")
+    today = datetime.now(kst).date()
+    monday = today - timedelta(days=today.weekday())
+
+    lines = ["📅 이번 주 점심 엠버서더 스케줄", "━━━━━━━━━━━━━━━"]
+    day_names = ["월", "화", "수", "목", "금"]
+    for i in range(5):
+        d = monday + timedelta(days=i)
+        chosen = get_weekly_ambassador(target_date=d)
+        marker = " 👈 오늘" if d == today else ""
+        lines.append(f"  {day_names[i]} ({d.month}/{d.day}) — {chosen['name']} [{chosen['category']}]{marker}")
+    lines.append("━━━━━━━━━━━━━━━")
+    lines.append("월~목 공평 로테이션 | 금요일 랜덤")
+    return "\n".join(lines)
+
 def send_daily_message():
     if not GROUP_ID:
         print("[ERROR] GROUP_ID not set", flush=True)
         return
-    chosen = pick_ambassador()
+    chosen = get_weekly_ambassador()
     weekday = get_weekday_kr()
     message = build_message(chosen, weekday)
     with ApiClient(configuration) as api_client:
@@ -101,22 +124,54 @@ def handle_message(event):
 
         if text == "/그룹아이디":
             source = event.source
-            reply_text = f"그룹 ID: {source.group_id}" if hasattr(source, "group_id") else "이 채팅방은 그룹이 아닙니다."
-            messaging_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
+            reply_text = (
+                f"그룹 ID: {source.group_id}"
+                if hasattr(source, "group_id")
+                else "이 채팅방은 그룹이 아닙니다."
+            )
+            messaging_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=reply_text)],
+                )
+            )
 
         elif text == "/점심뽑기":
-            chosen = pick_ambassador()
+            chosen = get_weekly_ambassador()
             weekday = get_weekday_kr()
             message = build_message(chosen, weekday)
-            messaging_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=message)]))
+            messaging_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=message)],
+                )
+            )
+
+        elif text == "/이번주":
+            message = get_week_schedule_message()
+            messaging_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=message)],
+                )
+            )
 
         elif text == "/엠버서더":
-            lines = ["📋 점심 엠버서더 목록", "━━━━━━━━━━━━━━━"]
+            lines = [
+                "📋 점심 엠버서더 목록",
+                "━━━━━━━━━━━━━━━",
+            ]
             for a in AMBASSADORS:
                 lines.append(f"• {a['name']} — {a['category']}")
             lines.append("━━━━━━━━━━━━━━━")
-            lines.append("매일 오후 5시에 내일의 담당자가 랜덤 발표됩니다.")
-            messaging_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text="\n".join(lines))]))
+            lines.append("월~목 공평 로테이션 | 금요일 랜덤")
+            lines.append("매일 오후 5시에 내일의 담당자가 발표됩니다.")
+            messaging_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="\n".join(lines))],
+                )
+            )
 
 
 @app.route("/", methods=["GET"])
